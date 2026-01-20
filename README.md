@@ -27,9 +27,10 @@ The project includes:
 This project implements a PLC-controlled pneumatic XYZ manipulator for automated loading tasks. The documentation describes the working principle of the system. This project was developed in a team of two.
 
 ## 5. Line Follower TurtleBot in ROS 2
-### File name: Line follower TurtleBot
+### File name: line_follower_cnn
 This project was developed in a team of four using ROS2. The robot follows a line using a virtual camera and a convolutional neural network (CNN) for line detection.
-I wrote the Python node that processes the virtual camera images and controls the robot to follow the line.
+I wrote the Python node that processes the virtual camera images and controls the robot to follow the line. 
+[Demo video](https://www.youtube.com/watch?v=4lzb9FwExe8&feature=youtu.be)
 
 
 
