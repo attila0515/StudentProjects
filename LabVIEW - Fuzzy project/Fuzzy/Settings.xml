@@ -1,0 +1,38 @@
+<?xml version='1.0' standalone='yes' ?>
+<LVData xmlns="http://www.ni.com/LVData">
+<Version>22.3.1f8</Version>
+<Cluster>
+<Name>Settings in</Name>
+<NumElts>3</NumElts>
+<Cluster>
+<Name>Hardware</Name>
+<NumElts>1</NumElts>
+<Refnum>
+<Name>VISA resource name</Name>
+<RefKind>VISA</RefKind>
+<Val></Val>
+</Refnum>
+</Cluster>
+<Cluster>
+<Name>Logging</Name>
+<NumElts>2</NumElts>
+<Refnum>
+<Name>tdms file out</Name>
+<RefKind>TDMS File</RefKind>
+<Val>0x00000000</Val>
+</Refnum>
+<Path>
+<Name>base path</Name>
+<Val>C:\Users\Attila\Desktop\Fuzzy_measure</Val>
+</Path>
+</Cluster>
+<Cluster>
+<Name>Set Temp</Name>
+<NumElts>1</NumElts>
+<DBL>
+<Name>Numeric</Name>
+<Val>24.00000000000000</Val>
+</DBL>
+</Cluster>
+</Cluster>
+</LVData>
