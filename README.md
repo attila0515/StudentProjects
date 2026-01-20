@@ -17,11 +17,6 @@ This project deals with axle detection and load estimation of road vehicles usin
 
 The goal of this project is to use a deep learning method to separate the merged sensor signals and extract the signal belonging to one vehicle.  
 
-The project includes:
-- a script for dataset generation and preprocessing  
-- a script that defines the network  
-- documentation
-
 ## 4. PLC-controlled manipulator
 ### File name: Servo-pneumatic
 This project implements a PLC-controlled pneumatic XYZ manipulator for automated loading tasks. The documentation describes the working principle of the system. This project was developed in a team of two.
