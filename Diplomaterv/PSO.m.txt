@@ -1,0 +1,100 @@
+function [vd,vq] = PSO(i_ref,idq,omega)
+    persistent v_old Ls Rs psi_s Ts Vdc idmax iqmax radius
+ 
+    if isempty(v_old) 
+        v_old = zeros(2,1); %[-1.1552; 9.6879];
+        Ls = 0.32e-3; % H
+        Rs = 0.285; % ohm
+        psi_s = 0.0079; % Vs
+
+        % Sampling time
+        Ts = 1e-4; % s
+    
+        % DC voltage
+        Vdc = 24; % V
+
+        idmax = 1;
+        iqmax = 4;
+
+        radius = Vdc/sqrt(3);
+    end
+    % 
+    vd = v_old(1);
+    vq = v_old(2);
+
+    iprev = [idq(1); idq(2)]; % measured currents
+    %omega = 5*omega;
+    % Prediction
+    % x[k+1] = A*x[k]+B*u[k]+d
+    % matrices
+    A = [1-Ts*Rs/Ls, omega*Ts; -omega*Ts, 1-Ts*Rs/Ls];
+    B = Ts/Ls*eye(2);
+    d = [0 -omega*Ts*psi_s/Ls]';
+
+    % k+1
+    ik_p1 = A*iprev+B*[v_old(1);v_old(2)]+d;
+
+    % Initialization
+    num_particles = 12;
+    c1 = 0.08; %1;
+    c2 = 0.08; %1.5;
+    w = 0.75;
+    iter = 12;
+    
+    xp = generatePoints(radius,num_particles);
+    xp(:,1) = zeros(2,1);
+    xp(:,2)= v_old;
+   
+    vp = (v_old-xp)./radius*0.1;
+    
+    pbest = xp;
+    pbest_val = CostFunction(xp,ik_p1,i_ref,A,B,d,idmax,iqmax);
+
+    
+    [gbest_val, gbest_i] = min(pbest_val);
+    gbest = xp(:,gbest_i);
+    
+    bValuesPSO = zeros(1,iter);
+    
+    for i=1:iter
+        for j=1:num_particles
+            r = rand(1,2); % random number
+            vp(:,j) = w*vp(:,j) + c1*r(1)*(pbest(:,j)-xp(:,j))+c2*r(2)*(gbest-xp(:,j));
+            xp(:,j) = xp(:,j) + vp(:,j);
+            if norm(xp(:,j)) > radius % outside of the circle then fit to the contour
+                xp(:,j) =  xp(:,j)./norm(xp(:,j))*radius;
+            end
+            fp_i = CostFunction(xp(:,j),ik_p1,i_ref,A,B,d,idmax,iqmax); % evaluate
+            
+            if (fp_i < pbest_val(j))
+                pbest(:,j) = xp(:,j); % update pbest 
+                pbest_val(j) = fp_i;
+            end
+            if (fp_i < gbest_val)
+                gbest = xp(:,j); % update gbest
+                gbest_val = fp_i;
+            end
+        end
+        bValuesPSO(i) = gbest_val;
+    end
+
+    v_old = gbest;
+    %vd = v_old(1);
+    %vq = v_old(2);
+
+end
+
+function points = generatePoints(R,numPoints)
+    xp = (2 * rand(2,numPoints) - ones(2,numPoints)) * R; % generate within a square, side length 2R
+    for i=1:numPoints
+        while (norm(xp(:,i)) > R)
+            xp(:,i) = (2 * rand(2,1) - ones(2,1)) * R; % regenerate
+        end
+    end
+    points = xp;
+end
+
+function g = CostFunction(v,ik1,iref,A,B,d,idmax,iqmax)
+    ik2 = A*ik1+B*v+d;
+    g = (iref-ik2(2,:)).^2+ik2(1,:).^2+10e4*(abs(ik2(1,:)) > idmax | abs(ik2(2,:)) > iqmax);
+end
