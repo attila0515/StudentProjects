@@ -1,0 +1,1042 @@
+// Included Files
+//
+#include "F28x_Project.h"
+#include <math.h>
+#include "F2837xD_Ipc_drivers.h" 
+
+//Rs 0.285
+// psi 0.0079
+#define NUM_PARTICLES 8
+#define ITER 10
+//#define Ls 0.00032
+//#define Rs 0.4 
+//#define Ts 0.0002
+//#define PSI 0.007
+#define ID_MAX 1.0
+#define IQ_MAX 5.0
+#define VDC 24.0
+#define RADIUS VDC*0.57735026919 
+
+#define TwoPerVDC 0.08333333333 
+#define LINE 250.0 
+#define T_SPEED 0.002 
+#define PI 3.141592653589793 
+#define OnePerSqrt3 0.57735026919 
+#define Sqrt3OverTwo 0.86602540378 
+#define CONST 0.1/RADIUS
+#define COS_60 cosf(PI/3)
+#define SIN_60 sinf(PI/3)
+#define M_MAX 0.2
+//random szám generáláshoz
+#define MUL 31821
+#define INC 13849
+#define SEED 21845
+#define mul 1.0/65536.0
+#define PWMMAX 20000 
+#define P 5.0
+
+
+void HRPWM_Config(Uint16 period); 
+
+float C1 = 0.08, C2 = 0.5, W = 0.75;
+int dummy =0;
+bool record = false;
+
+bool CHANGED = false;
+float Ls=0.00032;
+float Rs=0.5; //0.4
+float Ts=0.0002;
+float PSI=0.0035;
+float a11, dh, T, B, d;
+float A[2][2];
+
+volatile struct EPWM_REGS *ePWM[4] = {  0, &EPwm1Regs, &EPwm2Regs, &EPwm3Regs};
+
+typedef struct Particle{
+    float pos[2];
+    float speed[2];
+    float best_pos[2];
+    float best_val;
+} Particle;
+
+uint32_t c1_r_array[64];   // mapped to GS0 of shared RAM owned by CPU02 
+
+uint32_t c1_r_w_array[64]; // mapped to GS1 of shared RAM owned by CPU01 
+
+#pragma DATA_SECTION(c1_r_array,"SHARERAMGS0"); 
+#pragma DATA_SECTION(c1_r_w_array,"SHARERAMGS1"); 
+
+ 
+// IPC :: Externals 
+
+extern uint16_t isrfuncLoadStart; 
+
+extern uint16_t isrfuncLoadEnd; 
+
+extern uint16_t isrfuncRunStart; 
+
+extern uint16_t isrfuncLoadSize; 
+ 
+
+//float Voltage[6][2];
+//float id1c, iq1c, id2c, iq2c; 
+Uint16 ctr = 0, r = 0;
+
+//
+// Függvény deklarációk
+//
+void InitializeSwarm(Particle swarm[NUM_PARTICLES],float theta,int mode);
+void PSO(Particle swarm[NUM_PARTICLES], float omega);
+float CostFunction(float i_ref, float ik_d, float ik_q,float vd, float vq);
+void RandomGenerator();
+void ConfigureADC(void);
+void QEPInit(void); 
+__interrupt void adca1PSO_isr(void);
+
+// villamos mennyiségek
+float i_ref, ikd,ikq;
+float R = 0.005, Qi = 0.00001, Qb = 0.00001, Pkovi = 0.001,Pkovb = 0.001;
+float bd = 0.0, bq = 0.0;
+float Kd = 0.0, Kq = 0.0;
+//float y_k = 0.0, phi_k = 0.0;
+
+//float lambda_d = 1.0;
+// predikciós mennyiségek
+float ikp_d, ikp_q = 0.0, ikp2_d, ikp2_q;
+//float k1d, k1q, k2d, k2q;
+float IREFtest=0.0;
+
+//random szám generáláshoz
+Uint16 RAND_NUM = SEED;
+float r1,r2;
+//float ud, uq;
+float cost;
+
+// 
+float vref_a, vref_b, vref_c, vref_mid, vh, Vref, v_d, v_q, v_x, v_y; 
+int adc_number;
+long eqep_number;
+Uint16 duty_a, duty_b, duty_c; 
+volatile unsigned int PosActual, PosPrev, Pos, Pos_Mod; 
+unsigned int SpeedQEPcounter;
+volatile float w_fast=0; 
+volatile float w_mech=0.0; 
+float w_ref, K, KperTi_TS, Mold_ref;
+volatile float w_slow = 0; 
+volatile float w_slow_ave = 0; 
+volatile float w_slow_accu = 0; 
+volatile float Speed_scaler_fast; 
+float Speed_scaler_slow; 
+unsigned long temp1; 
+volatile int SpeedLoopCounter=0; 
+float error_old, new_error_sum, error_sum_old;
+float  ia, ib, ia_0, ib_0, sensorSample1, sensorSample2, I_scaler, ic;
+float id,iq, ix,iy,omega1, sin_alpha, cos_alpha, alpha1; 
+float ia_0_sum=0; 
+float ib_0_sum=0; 
+float error_w, error_prev_w; 
+bool start = false; 
+bool int_ok = true; 
+bool start_adc = true; 
+bool start_eqep = false; 
+bool encoderInit = false; 
+volatile float vd_1, vq_1;
+
+//float idbest, iqbest;
+
+// Initialization
+
+//float A[2][2]= {{1.0-Ts*Rs/Ls, Ts},{-Ts, 1.0-Ts*Rs/Ls}};
+float lambda = 0.0;
+
+Particle swarm[NUM_PARTICLES];
+float gbest[2];
+float gbest_val;
+int szam=0;
+float LS;
+//float gainA, gainB;
+
+/*void initDACA()
+{
+    EALLOW;
+    DacaRegs.DACCTL.bit.DACREFSEL=1;
+    DacaRegs.DACOUTEN.bit.DACOUTEN=1;
+    DacaRegs.DACVALS.all = 0;
+ 
+    DELAY_US(10);
+ 
+    EDIS;
+ 
+}*/
+/*
+void initDACB()
+{
+    EALLOW;
+    DacbRegs.DACCTL.bit.DACREFSEL=1;
+    DacbRegs.DACOUTEN.bit.DACOUTEN=1;
+    DacbRegs.DACVALS.all = 0;
+ 
+    DELAY_US(10);
+ 
+    EDIS;
+ 
+}
+*/
+
+ 
+/*void OutputDACA(float value, float gain)
+{
+    int temp;
+    temp = (int)(value*gain);
+    DacaRegs.DACVALS.bit.DACVALS = temp + 2047;
+}*/
+/*
+void OutputDACB(float value, float gain)
+{
+    int temp;
+    temp = (int)(value*gain);
+    DacbRegs.DACVALS.bit.DACVALS = temp + 2047;
+}
+*/
+// Main5
+//
+void main(void)
+{
+    a11=-Rs/Ls;
+    B=Ts/Ls;
+    d = -Ts*PSI/Ls;
+    A[0][0] = 1.0-Ts*Rs/Ls;
+    A[0][1] = Ts;
+    A[1][1] = 1.0-Ts*Rs/Ls;
+    A[1][0] = -Ts;
+    LS = Ls;
+    //gainA = 400.0;
+    //gainB = 400.0;
+
+    InitSysCtrl();
+    InitGpio();
+    //initDACA();
+    //initDACB();
+    EALLOW; 
+    DevCfgRegs.CPUSEL5.bit.SCI_A = 1; 
+    EDIS; 
+    CpuSysRegs.PCLKCR2.bit.EPWM1=1; 
+    CpuSysRegs.PCLKCR2.bit.EPWM2=1; 
+    CpuSysRegs.PCLKCR2.bit.EPWM3=1; 
+    EALLOW; 
+    GpioCtrlRegs.GPAPUD.bit.GPIO0 = 1;    // Disable pull-up on GPIO0 (EPWM1A) 
+    GpioCtrlRegs.GPAPUD.bit.GPIO1 = 1;    // Disable pull-up on GPIO1 (EPWM1B) 
+    GpioCtrlRegs.GPAMUX1.bit.GPIO0 = 1;   // Configure GPIO0 as EPWM1A 
+    GpioCtrlRegs.GPAMUX1.bit.GPIO1 = 1;   // Configure GPIO1 as EPWM1B 
+    GpioCtrlRegs.GPAPUD.bit.GPIO2 = 1;    // Disable pull-up on GPIO2 (EPWM2A) 
+    GpioCtrlRegs.GPAPUD.bit.GPIO3 = 1;    // Disable pull-up on GPIO3 (EPWM2B) 
+    GpioCtrlRegs.GPAMUX1.bit.GPIO2 = 1;   // Configure GPIO2 as EPWM2A 
+    GpioCtrlRegs.GPAMUX1.bit.GPIO3 = 1;   // Configure GPIO3 as EPWM2B 
+    GpioCtrlRegs.GPAPUD.bit.GPIO4 = 1;    // Disable pull-up on GPIO4 (EPWM3A) 
+    GpioCtrlRegs.GPAPUD.bit.GPIO5 = 1;    // Disable pull-up on GPIO5 (EPWM3B) 
+    GpioCtrlRegs.GPAMUX1.bit.GPIO4 = 1;   // Configure GPIO4 as EPWM3A 
+    GpioCtrlRegs.GPAMUX1.bit.GPIO5 = 1;   // Configure GPIO5 as EPWM3B 
+    GpioCtrlRegs.GPAPUD.bit.GPIO20 = 1;   // Disable pull-up on GPIO20 (EQEP1A)
+    GpioCtrlRegs.GPAPUD.bit.GPIO21 = 1;   // Disable pull-up on GPIO21 (EQEP1B)
+    GpioCtrlRegs.GPAPUD.bit.GPIO22 = 1;   // Disable pull-up on GPIO22 (EQEP1S)
+    GpioCtrlRegs.GPAPUD.bit.GPIO23 = 1;   // Disable pull-up on GPIO23 (EQEP1I)
+ 
+    GpioCtrlRegs.GPAQSEL2.bit.GPIO20 = 0;   // Sync to SYSCLKOUT GPIO20 (EQEP1A)
+    GpioCtrlRegs.GPAQSEL2.bit.GPIO21 = 0;   // Sync to SYSCLKOUT GPIO21 (EQEP1B)
+    GpioCtrlRegs.GPAQSEL2.bit.GPIO22 = 0;   // Sync to SYSCLKOUT GPIO22 (EQEP1S)
+    GpioCtrlRegs.GPAQSEL2.bit.GPIO23 = 0;   // Sync to SYSCLKOUT GPIO23 (EQEP1I)
+ 
+    GpioCtrlRegs.GPAMUX2.bit.GPIO20 = 1;   // Configure GPIO20 as EQEP1A
+    GpioCtrlRegs.GPAMUX2.bit.GPIO21 = 1;   // Configure GPIO21 as EQEP1B
+    GpioCtrlRegs.GPAMUX2.bit.GPIO22 = 1;   // Configure GPIO22 as EQEP1S
+    GpioCtrlRegs.GPAMUX2.bit.GPIO23 = 1;   // Configure GPIO23 as EQEP1I 
+    //TESTPIN GPIO32 J1P2 
+    GpioCtrlRegs.GPBMUX1.bit.GPIO32 = 0; 
+    GpioCtrlRegs.GPBDIR.bit.GPIO32 =  1; 
+    GpioDataRegs.GPBCLEAR.bit.GPIO32 =  1; 
+    //ENABLE pin 
+    GpioCtrlRegs.GPDMUX2.bit.GPIO124 = 0; 
+    GpioCtrlRegs.GPDDIR.bit.GPIO124 =  1; 
+    GpioDataRegs.GPDSET.bit.GPIO124 =  1; 
+    //GPIO94 J1 Pin3 
+    GpioCtrlRegs.GPCMUX2.bit.GPIO94 = 0; 
+    GpioCtrlRegs.GPCDIR.bit.GPIO94 =  1; 
+    GpioDataRegs.GPCCLEAR.bit.GPIO94 =  0; 
+    EDIS; 
+    DINT;
+    InitPieCtrl();
+    IER = 0x0000;
+    IFR = 0x0000;
+    InitPieVectTable();
+    EALLOW; 
+    CpuSysRegs.PCLKCR0.bit.TBCLKSYNC = 1; 
+    ClkCfgRegs.PERCLKDIVSEL.bit.EPWMCLKDIV = 0x0; //division by 1 
+    EDIS; 
+    EALLOW;
+    //GPIO19 J1 Pin3
+    GpioCtrlRegs.GPAMUX2.bit.GPIO19 = 0;
+    GpioCtrlRegs.GPADIR.bit.GPIO19 =  1;
+    GpioDataRegs.GPACLEAR.bit.GPIO19 =  1;
+    EDIS;    
+    EALLOW; 
+    PieVectTable.ADCA1_INT = &adca1PSO_isr; //function for ADCA interrupt 1 
+    EDIS;   
+    ConfigureADC(); 
+    IER |= M_INT1; //Enable group 1 interrupts 
+    IER |= M_INT14; //Enable group 13 interrupt 
+    EINT;  // Enable Global interrupt INTM 
+    ERTM;  // Enable Global realtime interrupt DBGM  
+
+    // enable PIE interrupt 
+    PieCtrlRegs.PIEIER1.bit.INTx1 = 1; 
+
+    // Create constant voltage vectors
+    /*int j;
+    Voltage[0][0] = 0.6666*VDC;
+    Voltage[0][1] = 0.0;
+    for (j = 1; j < 6; j++)
+    {
+        Voltage[j][0] = Voltage[j-1][0]*COS_60-Voltage[j-1][1]*SIN_60;
+        Voltage[j][1] = Voltage[j-1][0]*SIN_60+Voltage[j-1][1]*COS_60;
+    }
+    */
+    HRPWM_Config(PWMMAX);
+    QEPInit();
+    GpioDataRegs.GPDCLEAR.bit.GPIO124 =  1; 
+    
+    // Inicializálás
+    I_scaler = 30.0/4096.0;
+    PosPrev=0;
+    SpeedLoopCounter=0;
+    v_d=0.0;
+    v_q=0.0;
+    Speed_scaler_fast = 2.0*PI*1.0/(4.0*LINE*T_SPEED);
+    Speed_scaler_slow = 314159.2653;
+    w_ref=0.0;
+    K=0.01;
+    KperTi_TS=0.0004;
+    error_sum_old=0.0;
+    EALLOW; 
+    GpioCtrlRegs.GPBMUX1.bit.GPIO42 = 3; 
+    GpioCtrlRegs.GPBMUX1.bit.GPIO43 = 3; 
+    GpioCtrlRegs.GPBGMUX1.bit.GPIO42 = 3; 
+    GpioCtrlRegs.GPBGMUX1.bit.GPIO43 = 3; 
+    GpioCtrlRegs.GPBCSEL2.bit.GPIO42 = 2; 
+    GpioCtrlRegs.GPBCSEL2.bit.GPIO43 = 2; 
+    EDIS; 
+    while( !(MemCfgRegs.GSxMSEL.bit.MSEL_GS0 & MemCfgRegs.GSxMSEL.bit.MSEL_GS14)) 
+    { 
+        EALLOW; 
+        MemCfgRegs.GSxMSEL.bit.MSEL_GS0 = 1; 
+        MemCfgRegs.GSxMSEL.bit.MSEL_GS14 = 1;
+        EDIS; 
+    } 
+   // 
+
+   // Step 12. Copy ISR routine to a specified RAM location to determine the size 
+
+   // 
+
+    memcpy(&isrfuncRunStart, &isrfuncLoadStart, (uint32_t)&isrfuncLoadSize);
+    for(;;)
+    {
+       DELAY_US(1000); 
+
+    }
+}
+
+//
+// Randomszám generátor
+//
+void RandomGenerator()
+{
+	RAND_NUM = (RAND_NUM * MUL) + INC;
+	r1 = ((float)RAND_NUM)*mul;
+	RAND_NUM = (RAND_NUM * MUL) + INC;
+	r2 = ((float)RAND_NUM)*mul;
+}
+
+//
+// Költségfüggvény
+//
+float CostFunction(float i_ref, float ik_d, float ik_q,float vd, float vq)
+{
+    float g = (i_ref-ik_q)*(i_ref-ik_q)+(ik_d*ik_d) + lambda *((vd-v_d)*(vd-v_d)+(vq-v_q)*(vq-v_q));
+    /*if (ik_q > IQ_MAX || ik_q < (-IQ_MAX))
+    {
+        g = 10000.0;
+    }
+    else 
+    if (ik_d > ID_MAX || ik_d < (-ID_MAX))
+    {
+        g = 10000.0;
+    }*/
+    return g;
+}
+
+
+void InitializeSwarm(Particle swarm[NUM_PARTICLES], float theta, int mode)
+{
+   int i;
+   gbest_val = 10000.0;
+   // Theta in pirad
+   //float COS_THETA = __cospuf32(theta);
+   //float SIN_THETA = __sinpuf32(theta);
+   for (i = 0; i < NUM_PARTICLES; i++)
+    {
+        if (i == 0)
+        {
+            swarm[i].pos[0] = swarm[i].pos[1] = 0;
+            swarm[i].speed[0] = CONST*v_d;
+            swarm[i].speed[1] = CONST*v_q;
+        }
+        else if (i == 1)
+        {
+            swarm[i].pos[0] = v_d;
+            swarm[i].pos[1] = v_q;
+            swarm[i].speed[0] = swarm[i].speed[1] = 0;
+        }
+        else
+        {
+            RandomGenerator();
+            swarm[i].pos[0] = RADIUS*(2*r1-1.0);
+            swarm[i].pos[1] = RADIUS*(2*r2-1.0);
+            swarm[i].speed[0] = CONST*(v_d - swarm[i].pos[0]);
+            swarm[i].speed[1] = CONST*(v_q - swarm[i].pos[1]);
+        }
+
+        swarm[i].best_pos[0] = swarm[i].pos[0]; 
+        swarm[i].best_pos[1] = swarm[i].pos[1]; 
+        swarm[i].best_val = CostFunction(i_ref,ikp2_d + B* swarm[i].best_pos[0],ikp2_q + B* swarm[i].best_pos[1],swarm[i].best_pos[0],swarm[i].best_pos[1]);
+        if (swarm[i].best_val < gbest_val)
+        {
+            gbest_val = swarm[i].best_val;
+            gbest[0] = swarm[i].best_pos[0];
+            gbest[1] = swarm[i].best_pos[1];
+        }
+    }
+   /*switch (mode) {
+        // Random
+        case 0:
+            for (i = 0; i < NUM_PARTICLES; i++)
+            {
+                if (i == 0)
+                {
+                    swarm[i].pos[0] = swarm[i].pos[1] = 0;
+                    swarm[i].speed[0] = CONST*v_d;
+                    swarm[i].speed[1] = CONST*v_q;
+                }
+                else if (i == 1)
+                {
+                    swarm[i].pos[0] = v_d;
+                    swarm[i].pos[1] = v_q;
+                    swarm[i].speed[0] = swarm[i].speed[1] = 0;
+                }
+                else
+                {
+                    RandomGenerator();
+                    swarm[i].pos[0] = RADIUS*(2*r1-1.0);
+                    swarm[i].pos[1] = RADIUS*(2*r2-1.0);
+                    swarm[i].speed[0] = CONST*(v_d - swarm[i].pos[0]);
+                    swarm[i].speed[1] = CONST*(v_q - swarm[i].pos[1]);
+                }
+
+                swarm[i].best_pos[0] = swarm[i].pos[0]; 
+                swarm[i].best_pos[1] = swarm[i].pos[1]; 
+                swarm[i].best_val = CostFunction(i_ref,ikp2_d + B* swarm[i].best_pos[0],ikp2_q + B* swarm[i].best_pos[1],swarm[i].best_pos[0],swarm[i].best_pos[1]);
+                if (swarm[i].best_val < gbest_val)
+                {
+                    gbest_val = swarm[i].best_val;
+                    gbest[0] = swarm[i].best_pos[0];
+                    gbest[1] = swarm[i].best_pos[1];
+                }
+            }
+        break;
+        // 
+        case 1:
+            for (i = 0; i < NUM_PARTICLES; i++)
+            {
+                if (i == 0)
+                {
+                    swarm[i].pos[0] = 0.0;
+                    swarm[i].pos[1] = 0.0;
+                    swarm[i].speed[0] = CONST*v_d;
+                    swarm[i].speed[1] = CONST*v_q;
+                }
+                else if (i == 7)
+                {
+                    swarm[i].pos[0] = v_d;
+                    swarm[i].pos[1] = v_q;
+                    swarm[i].speed[0] = swarm[i].speed[1] = 0.0;
+                }
+                else
+                {
+                    swarm[i].pos[0] = Voltage[i-1][0]*COS_THETA+Voltage[i-1][1]*SIN_THETA;
+                    ud = Voltage[i-1][0]*COS_THETA+Voltage[i-1][1]*SIN_THETA;
+                    uq = -Voltage[i-1][0]*SIN_THETA+Voltage[i-1][1]*COS_THETA;
+                    swarm[i].pos[1] = -Voltage[i-1][0]*SIN_THETA+Voltage[i-1][1]*COS_THETA;
+                    vd_1 = Voltage[0][0]*COS_THETA+Voltage[0][1]*SIN_THETA;
+                    vq_1 =  -Voltage[0][0]*SIN_THETA+Voltage[0][1]*COS_THETA;
+                    swarm[i].speed[0] = CONST*(v_d - swarm[i].pos[0]);
+                    swarm[i].speed[1] = CONST*(v_q - swarm[i].pos[1]);
+                }
+
+                swarm[i].best_pos[0] = swarm[i].pos[0]; 
+                swarm[i].best_pos[1] = swarm[i].pos[1]; 
+                swarm[i].best_val = CostFunction(i_ref,ikp2_d + B* swarm[i].best_pos[0],ikp2_q + B* swarm[i].best_pos[1],swarm[i].best_pos[0],swarm[i].best_pos[1]);
+                if (swarm[i].best_val < gbest_val)
+                {
+                    gbest_val = swarm[i].best_val;
+                    gbest[0] = swarm[i].best_pos[0];
+                    gbest[1] = swarm[i].best_pos[1];
+                }
+            }
+            break;
+    
+   }*/
+}
+
+//
+// PSO algoritmus
+//
+void PSO(Particle swarm[NUM_PARTICLES], float omega)
+{
+    int iter, i;
+
+    for (iter = 0; iter < ITER; iter++)
+    {
+       
+        for (i = 0; i < NUM_PARTICLES; i++)
+        {
+            RandomGenerator();
+            swarm[i].speed[0] = W*swarm[i].speed[0]+C1*r1*(v_d-swarm[i].pos[0])+C2*r2*(gbest[0]-swarm[i].pos[0]);
+            swarm[i].pos[0] = swarm[i].pos[0] + swarm[i].speed[0];
+            swarm[i].speed[1] = W*swarm[i].speed[1]+C1*r1*(v_q-swarm[i].pos[1])+C2*r2*(gbest[1]-swarm[i].pos[1]);
+            swarm[i].pos[1] = swarm[i].pos[1] + swarm[i].speed[1]; 
+            cost = CostFunction(i_ref,ikp2_d + B* swarm[i].pos[0],ikp2_q + B* swarm[i].pos[1],swarm[i].pos[0],swarm[i].pos[1]);
+            //cost = CostFunction(i_ref,ikp_d + B* swarm[i].pos[0],ikp2_q + B* swarm[i].pos[1],swarm[i].pos[0],swarm[i].pos[1]);
+            if (cost < swarm[i].best_val)
+            {
+                swarm[i].best_val = cost;
+                swarm[i].best_pos[0] = swarm[i].pos[0];
+                swarm[i].best_pos[1] = swarm[i].pos[1];
+            }
+            
+            
+        } // pbest frissítés
+
+        for (i = 0; i < NUM_PARTICLES; i++)
+        {
+            if (swarm[i].best_val < gbest_val)
+            {
+                gbest_val = swarm[i].best_val;
+                gbest[0] = swarm[i].best_pos[0];
+                gbest[1] = swarm[i].best_pos[1];
+            }
+        } // gbest frissítés
+
+    } //iteráció vége
+    /*if ((v_q*v_q-gbest[1]*gbest[1]) < -2.0  || (v_q*v_q-gbest[1]*gbest[1]) > 2.0)
+    {
+         GpioDataRegs.GPBSET.bit.GPIO32 =  1;
+    }
+    else {
+     GpioDataRegs.GPBCLEAR.bit.GPIO32 =  1;
+    }*/
+    // 
+    v_d = gbest[0];
+    v_q = gbest[1];
+    //idbest = ikp2_d + B* v_d;
+    //iqbest = ikp2_q + B* v_q;
+    if (v_d >  RADIUS) { v_d = RADIUS; gbest[0] = RADIUS; } 
+    if (v_d < -RADIUS) { v_d = -RADIUS; gbest[0] = -RADIUS; } 
+    if (v_q >  RADIUS) { v_q = RADIUS; gbest[1] = RADIUS; } 
+    if (v_q < -RADIUS) { v_q = -RADIUS; gbest[1] = -RADIUS; }
+}
+
+void HRPWM_Config(Uint16 period)
+{ 
+    Uint16 j; 
+    for (j=1;j<4;j++) 
+    {  
+        (*ePWM[j]).TBCTL.bit.PRDLD = TB_SHADOW;             // set shadow load 
+        (*ePWM[j]).TBPRD = period-1;                        // PWM frequency = 1 / period 
+        (*ePWM[j]).CMPA.bit.CMPA = period/2;             // set duty 50% initially 
+        (*ePWM[j]).CMPA.bit.CMPAHR = 0;             // initialize HRPWM extension 
+        (*ePWM[j]).CMPB.bit.CMPB = period/2;                       // set duty 50% initially 
+        (*ePWM[j]).TBPHS.all = 0; 
+        (*ePWM[j]).TBCTR = 0;   
+        (*ePWM[j]).TBCTL.bit.CTRMODE = TB_COUNT_UPDOWN; 
+        if (j==1) 
+        {
+            (*ePWM[j]).TBCTL.bit.PHSEN = TB_DISABLE; //Disable hardware synch for EPWM1 
+            (*ePWM[j]).TBCTL.bit.SYNCOSEL = TB_CTR_ZERO ; //TB_CTR_ZEROTB_SYNC_DISABLE 
+        } 
+        else 
+        { 
+            (*ePWM[j]).TBCTL.bit.PHSEN = TB_ENABLE; 
+            (*ePWM[j]).TBCTL.bit.SYNCOSEL = TB_SYNC_IN; 
+        }   
+        (*ePWM[j]).TBCTL.bit.HSPCLKDIV = TB_DIV1; 
+        (*ePWM[j]).TBPHS.all = 0x0000; 
+        (*ePWM[j]).TBCTL.bit.CLKDIV = TB_DIV1; 
+        (*ePWM[j]).TBCTL.bit.FREE_SOFT = 11; 
+        (*ePWM[j]).CMPCTL.bit.LOADAMODE = CC_CTR_ZERO; //CC_CTR_ZERO 
+        (*ePWM[j]).CMPCTL.bit.LOADBMODE = CC_CTR_ZERO; 
+        (*ePWM[j]).CMPCTL.bit.SHDWAMODE = CC_SHADOW; 
+        (*ePWM[j]).CMPCTL.bit.SHDWBMODE = CC_SHADOW;   
+        (*ePWM[j]).AQCTLA.bit.CAD = AQ_SET;               // PWM toggle high/low 
+        (*ePWM[j]).AQCTLA.bit.CAU = AQ_CLEAR; 
+        (*ePWM[j]).AQSFRC.bit.RLDCSF = 0b10; 
+        (*ePWM[j]).DBCTL.bit.OUT_MODE = DB_FULL_ENABLE; // Enable Dead-band module 
+        (*ePWM[j]).DBCTL.bit.POLSEL = DB_ACTV_HIC;      // Active High Complementary (AHC) 
+        (*ePWM[j]).DBRED.bit.DBRED = 40;                // RED = 100 TBCLKs = 0.2us 
+        (*ePWM[j]).DBFED.bit.DBFED = 40;     
+        if (j==1) 
+        { 
+            (*ePWM[j]).ETSEL.bit.SOCAEN  = 1;         // Enable SOC on A group 
+            (*ePWM[j]).ETSEL.bit.SOCASEL = 2;         // sampling at zero 
+            (*ePWM[j]).ETPS.bit.SOCAPRD  = 1;         // Generate pulse on 1st event 
+        }     
+    } 
+} 
+
+//
+// ADC konfig
+//
+void ConfigureADC(void) 
+{ 
+    EALLOW; 
+    AdcaRegs.ADCCTL2.bit.PRESCALE = 6; //set ADCCLK divider to /4 
+    AdcaRegs.ADCCTL2.bit.RESOLUTION = ADC_BITRESOLUTION_12BIT; 
+    AdcaRegs.ADCCTL2.bit.SIGNALMODE = ADC_SIGNALMODE_SINGLE; 
+    AdcbRegs.ADCCTL2.bit.PRESCALE = 6; //set ADCCLK divider to /4 
+    AdcbRegs.ADCCTL2.bit.RESOLUTION = ADC_BITRESOLUTION_12BIT; 
+    AdcbRegs.ADCCTL2.bit.SIGNALMODE = ADC_SIGNALMODE_SINGLE;  
+
+    AdcaRegs.ADCCTL1.bit.INTPULSEPOS =1;
+    AdcbRegs.ADCCTL1.bit.INTPULSEPOS =1;
+    AdcaRegs.ADCCTL1.bit.ADCPWDNZ =1;
+    AdcbRegs.ADCCTL1.bit.ADCPWDNZ =1;
+    DELAY_US(1000); 
+    EDIS; 
+    EALLOW; 
+    AdcaRegs.ADCSOC0CTL.bit.CHSEL = 3;  //SOC0 will convert pin A3 (J3P26, Ia) 
+    AdcaRegs.ADCSOC0CTL.bit.ACQPS = 120; //sample window 
+    AdcaRegs.ADCSOC0CTL.bit.TRIGSEL = 0x05; //epwm1a 
+    AdcbRegs.ADCSOC0CTL.bit.CHSEL = 2;  //SOC0 will convert pin B2 (J3P28, Ib) 
+    AdcbRegs.ADCSOC0CTL.bit.ACQPS = 120; 
+    AdcbRegs.ADCSOC0CTL.bit.TRIGSEL = 0x05; //epwm1a 
+    AdcaRegs.ADCINTSEL1N2.bit.INT1SEL = 0; //end of SOC0 will set INT1 flag 
+    AdcaRegs.ADCINTSEL1N2.bit.INT1E = 1;   //enable INT1 flag 
+    AdcaRegs.ADCINTFLGCLR.bit.ADCINT1 = 1; //make sure INT1 flag is cleared 
+    EDIS;
+}
+
+
+
+//
+// QEP inicializálás
+//
+void  QEPInit(void) 
+{  
+    EQep1Regs.QUPRD=200000;         // Unit Timer for 1000Hz at 200 MHz SYSCLKOUT  
+    EQep1Regs.QDECCTL.bit.QSRC=00;      // QEP quadrature count mode 
+    EQep1Regs.QEPCTL.bit.FREE_SOFT=2; 
+    EQep1Regs.QEPCTL.bit.PCRM=0b01;       // PCRM=00 mode - QPOSCNT reset on index event, PCRM=01 reset on max 
+    EQep1Regs.QEPCTL.bit.UTE=1;         // Unit Timeout Enable 
+    EQep1Regs.QEPCTL.bit.QCLM=0;        // Latch when CPU reads position counter 
+    EQep1Regs.QPOSMAX=999; 
+    //EQep1Regs.QEPCTL.bit.QPEN=1;        // QEP enable 
+    EQep1Regs.QCAPCTL.bit.UPPS=2;       // 1/4 for unit position 
+    EQep1Regs.QCAPCTL.bit.CCPS=4;       // 1/16 for CAP clock 
+    EQep1Regs.QCAPCTL.bit.CEN=1;        // QEP Capture Enable  
+} 
+
+//
+// INTERRUPT ADC
+//
+interrupt void adca1PSO_isr(void) 
+{ 
+    AdcaRegs.ADCINTFLGCLR.bit.ADCINT1 = 1; //clear INT1 flag
+    if(SpeedLoopCounter==10)
+    { 
+        SpeedLoopCounter=1; 
+        if(start==true)
+        { 
+            PosActual=Pos; 
+            w_slow_ave = __divf32(w_slow_accu,(float)SpeedQEPcounter); 
+            SpeedQEPcounter=0; 
+            w_slow_accu = 0.0; 
+            if(EQep1Regs.QEPSTS.bit.QDF==0)             //counting down //0 lenne 
+            { 
+                if(PosActual>PosPrev)
+                { 
+                    w_fast=((float)PosActual-(float)PosPrev-4.0*LINE)*Speed_scaler_fast;  //rad/s 
+                } 
+                else
+                { 
+                    w_fast=((float)PosActual-(float)PosPrev)*Speed_scaler_fast;  //rad/s 
+                } 
+            } 
+            else if(EQep1Regs.QEPSTS.bit.QDF==1)     //counting up  //1 lenne 
+            { 
+                if(PosActual<PosPrev) 
+                { 
+                    w_fast=((float)PosActual-(float)PosPrev+4.0*LINE)*Speed_scaler_fast;  //rad/s 
+                } 
+                else 
+                { 
+                    w_fast=((float)PosActual-(float)PosPrev)*Speed_scaler_fast;  //rad/s 
+                } 
+            } 
+
+            PosPrev=PosActual; 
+            w_mech = w_slow_ave;
+            //Sebesség PI
+            error_old=w_ref-w_mech; 
+            new_error_sum=error_sum_old+error_old; 
+            Mold_ref=K*error_old+KperTi_TS*new_error_sum; 
+            int_ok=true; 
+            if(Mold_ref>M_MAX) 
+            { 
+                Mold_ref=M_MAX; 
+                if(error_old>0) 
+                { 
+                    int_ok=false; 
+                } 
+            } 
+            if(Mold_ref<-M_MAX) 
+            { 
+                Mold_ref=-M_MAX; 
+                if(error_old<0) 
+                { 
+                    int_ok=false; 
+                } 
+            } 
+            if(int_ok) 
+            { 
+                error_sum_old=new_error_sum; 
+            }
+            i_ref=Mold_ref*18.18; 
+            //i_ref=IREFtest;
+        }
+    } 
+    else 
+    { 
+        SpeedLoopCounter++; 
+        //Time based speed measurement 
+        if(EQep1Regs.QEPSTS.bit.UPEVNT == 1)               // Unit position event 
+        { 
+            SpeedQEPcounter++; 
+            unsigned int temp1; 
+            if(EQep1Regs.QEPSTS.bit.COEF == 0)             // No Capture overflow 
+            { 
+                temp1 = (unsigned long)EQep1Regs.QCPRDLAT; // temp1 = t2-t1 
+            } 
+            else   // Capture overflow, saturate the result 
+            { 
+                temp1 = 65535; 
+            } 
+            if(EQep1Regs.QEPSTS.bit.QDF==0) 
+            { 
+                w_slow = __divf32(-Speed_scaler_slow,(float)temp1); 
+            } 
+            else if(EQep1Regs.QEPSTS.bit.QDF==1) 
+            { 
+                w_slow = __divf32(Speed_scaler_slow,(float)temp1); 
+            } 
+                w_slow_accu += w_slow; 
+                EQep1Regs.QEPSTS.all = 0x88; // Clear Unit position event flag 
+                                            // Clear overflow error flag 
+        } 
+    }   
+
+    if(adc_number<65) 
+        { 
+            if(adc_number>4) 
+            { 
+            ia_0_sum=ia_0_sum+AdcaResultRegs.ADCRESULT0; 
+            ib_0_sum=ib_0_sum+AdcbResultRegs.ADCRESULT0; 
+            } 
+        adc_number++; 
+    } 
+    else if(start_adc==true) 
+    { 
+        ia_0=ia_0_sum/60.0; 
+        ib_0=ib_0_sum/60.0; 
+        start_adc=false; 
+        start_eqep=true; 
+        vref_a=0.55; 
+        vref_b=0.475; 
+        vref_c=0.475; 
+        //phase a 
+        duty_a=(Uint16)(vref_a*PWMMAX); 
+        //phase b 
+        duty_b=(Uint16)(vref_b*PWMMAX); 
+        //phase c 
+        duty_c=(Uint16)(vref_c*PWMMAX); 
+        EPwm1Regs.CMPA.bit.CMPA = duty_a; 
+        EPwm2Regs.CMPA.bit.CMPA = duty_b; 
+        EPwm3Regs.CMPA.bit.CMPA = duty_c; 
+  } 
+    if(eqep_number<20000 && start_eqep==true)    //wait 5 seconds 
+    { 
+        eqep_number++; 
+    } 
+    else if(start_eqep==true) 
+    { 
+        EQep1Regs.QEPCTL.bit.QPEN=1;        // QEP enable 
+        start_eqep=false; 
+        start=true; 
+        vref_a=0.5; 
+        vref_b=0.5; 
+        vref_c=0.5; 
+        //phase a 
+        duty_a=(Uint16)(vref_a*PWMMAX); 
+        //phase b 
+        duty_b=(Uint16)(vref_b*PWMMAX); 
+        //phase c 
+        duty_c=(Uint16)(vref_c*PWMMAX); 
+        EPwm1Regs.CMPA.bit.CMPA = duty_a; 
+        EPwm2Regs.CMPA.bit.CMPA = duty_b; 
+        EPwm3Regs.CMPA.bit.CMPA = duty_c; 
+    } 
+    if(start==true) 
+    { 
+        GpioDataRegs.GPBSET.bit.GPIO32 =  1;
+        sensorSample1 = AdcaResultRegs.ADCRESULT0; 
+        sensorSample2 = AdcbResultRegs.ADCRESULT0;
+        Pos=(unsigned int)EQep1Regs.QPOSCNT; 
+        ia=-((float)sensorSample1-ia_0)*I_scaler; 
+        ib=-((float)sensorSample2-ib_0)*I_scaler; 
+        ic = -ia-ib;
+
+        Pos_Mod = Pos-(Pos/200)*200; 
+        alpha1=(float)Pos_Mod*0.005; //0-1 0-2pi helyett 
+        sin_alpha=__sinpuf32(alpha1); 
+        cos_alpha=__cospuf32(alpha1); 
+  	
+        ix = ia; 
+        iy = (2.0*ib + ia)*OnePerSqrt3; 
+        //Transform to RRF 
+        id = ix*cos_alpha + iy*sin_alpha; 
+        iq = -ix*sin_alpha + iy*cos_alpha; 
+        omega1 = P*w_mech; 
+       //GpioDataRegs.GPBSET.bit.GPIO32 =  1; // Debug purposes only 
+       // Prediction Euler method
+        // Prediction 1. step
+        //id1c = A[0][0]*id+omega1*A[0][1]*iq+B*v_d;
+        //iq1c = omega1*A[1][0]*id+A[1][1]*iq+B*v_q+d*omega1;
+        // Prediction 2. step
+        //id2c = A[0][0]*id1c+omega1*A[0][1]*iq1c;
+        //iq2c = omega1*A[1][0]*id1c+A[1][1]*iq1c+d*omega1;
+        if (CHANGED)
+        {
+            //a11 = -Rs/Ls;
+            //dh = -PSI/Ls;
+            //B=Ts/Ls;
+            /*phi_k = -omega1*B;
+            y_k = iq - (A[1][0]*idold+A[1][1]*iqold+B*v_q);
+            K = (P_param * phi_k) / (1+phi_k*phi_k*P_param);
+            PSI = PSI + K *(y_k-phi_k*PSI);
+            P_param = P_param - K *phi_k*P_param;*/
+            d  = -Ts*PSI/Ls;
+            /*d = -Ts*PSI/Ls;
+            T = 0.5*Ts;*/
+            A[0][0] = 1.0-Ts*Rs/Ls;
+            A[0][1] = Ts; // 1
+            A[1][1] = 1.0-Ts*Rs/Ls;
+            A[1][0] = -Ts;
+            LS = Ls;
+            CHANGED = false;
+        }
+        //Prediction Heun
+        /*k1d = a11*id+omega1*iq+1/LS*v_d;
+        k1q = -omega1*id+a11*iq+1/LS*v_q+dh*omega1;
+        ikp_d = id+Ts*k1d;
+        ikp_q = iq+Ts*k1q;
+
+        k2d = a11*ikp_d+omega1*ikp_q+1/LS*v_d;
+        k2q = -omega1*ikp_d+a11*ikp_q+1/LS*v_q+dh*omega1;
+        ikp_d = id+T*(k1d+k2d);
+        ikp_q = iq+T*(k1q+k2q);*/
+        
+        // Parameter estimator
+
+        ikp_d = A[0][0]*id+omega1*A[0][1]*iq+B*v_d; 
+        //k1q = -omega1*ikp_d + a11*iq + 1/LS*v_q + dh*omega1;
+        //ikp_q = iq + Ts*k1q;
+        ikp_q = omega1*A[1][0]*id+A[1][1]*iq+d*omega1+B*v_q;
+        
+        Kd = Pkovi/(Pkovi+R);
+        Kq  = Pkovb/(Pkovb+R);
+        ikp_d= ikp_d+Kd*(id-ikp_d-bd);
+        ikp_q= ikp_q+Kq*(iq-ikp_q-bq);
+        bd= bd+Kd*(id-ikp_d-bd);
+        bq= bq+Kq*(iq-ikp_q-bq);
+
+        Pkovi = (1-Kd)*Pkovi+Qi;
+        Pkovb = (1-Kq)*Pkovb+Qb;
+        //ikp_q = (iq + Ts*(-omega1*ikp_d + (1/LS)*v_q + dh*omega1)) / (1 - Ts*a11);
+        ikd = ikp_d + bd;
+        ikq = ikp_q + bq;
+        ikp2_d = A[0][0]*ikd+omega1*A[0][1]*ikq;
+        ikp2_q = omega1*A[1][0]*ikd+A[1][1]*ikq+d*omega1; 
+        //ikp2_d = A[0][0]*ikp_d+omega1*A[0][1]*ikp_q;
+        //ikp2_q = omega1*A[1][0]*ikp_d+A[1][1]*ikp_q+d*omega1; 
+        
+        // Update currents for param. estimator
+        //idold = id;
+        //iqold = iq;
+        //GpioDataRegs.GPBCLEAR.bit.GPIO32 =  1; //szenzor+holtido+kalman
+        // Initialization of particles
+        InitializeSwarm(swarm,alpha1,1);
+        // PSO algorithm
+        //GpioDataRegs.GPBCLEAR.bit.GPIO32 =  1; //init
+         
+        PSO(swarm,omega1);
+        GpioDataRegs.GPBCLEAR.bit.GPIO32 =  1; //PSO
+        ctr++;
+
+        if (ctr == 65535) r++;
+        /*if (szam == 0)
+        {
+            gainB = iq;
+            //OutputDACB(i_ref, gainB);
+        }
+        if (szam == 1)
+        {
+            gainB=w_mech;
+        }*/
+        //OutputDACA(i_ref, 250.0);
+       /*switch(szam)
+        {
+            // speed
+            case 0:
+                break;
+            // current
+            case 1:
+                OutputDACA(iq, gainA);
+                //OutputDACB(i_ref,gainA);
+                break;
+            case 2:
+                OutputDACA(v_q, gainA);
+                //OutputDACB(v_q,gainA); 
+                break;
+            case 3:
+                OutputDACA(w_mech, gainA);
+                //OutputDACB(w_mech,gainA);
+                break;
+            case 4:
+                OutputDACA(id, gainA);
+                //OutputDACB(iq,gainA);
+                break;
+        }
+        */
+        v_x = cos_alpha * v_d - sin_alpha*v_q; 
+        v_y = sin_alpha * v_d + cos_alpha*v_q; 
+            
+        v_x = v_x * TwoPerVDC; 
+        v_y = v_y * TwoPerVDC; 
+        //Inverse space vector transformation 
+        vref_a = v_x; 
+        vref_b = v_y * Sqrt3OverTwo - 0.5 * v_x; 
+        vref_c = -0.5 * v_x - v_y * Sqrt3OverTwo; 
+        //Selection of vmid
+        if (vref_a > vref_b) 
+        { 
+            if (vref_b> vref_c) 
+            { 
+                vref_mid = vref_b;      //sector 1 
+            } 
+            else if (vref_a > vref_c) 
+            { 
+                vref_mid = vref_c;      //Sector 6 
+            } 
+            else 
+            { 
+                vref_mid = vref_a;      //Sector 5 
+            } 
+        } 
+        else if (vref_b < vref_c) vref_mid = vref_b;      //Sector 4 
+        else if (vref_a > vref_c) vref_mid = vref_a;      //Sector 2 
+        else vref_mid = vref_c;      //Sector 3 
+    
+        vh=vref_mid*0.5 + 0.5; 
+        vref_a+=vh; 
+        vref_b+=vh; 
+        vref_c+=vh; 
+        // vref_a=0.5; 
+        // vref_b=0.5; 
+        // vref_c=0.5; 
+        //phase a 
+        duty_a=(Uint16)(vref_a*PWMMAX); 
+        //phase b 
+        duty_b=(Uint16)(vref_b*PWMMAX); 
+        //phase c 
+        duty_c=(Uint16)(vref_c*PWMMAX); 
+        EPwm1Regs.CMPA.bit.CMPA = duty_a; 
+        EPwm2Regs.CMPA.bit.CMPA = duty_b; 
+        EPwm3Regs.CMPA.bit.CMPA = duty_c; 
+    } 
+    
+    // Recording
+    if (record) 
+    { 
+        dummy = 5000;
+        c1_r_w_array[2]=1; 
+        record = false; 
+        //w_ref = 120.0;
+    } 
+    if (dummy<0) 
+    { 
+        c1_r_w_array[2]=0; 
+        dummy = 0;
+        //w_ref = 0.0;
+    } 
+    if(c1_r_w_array[2]>0) 
+    {
+        int idx = dummy % 4;
+
+        if (idx == 0) {
+            c1_r_w_array[0] = *((uint32_t*)&id); 
+            c1_r_w_array[1] = *((uint32_t*)&iq); 
+        } 
+        else if (idx == 1) {
+            c1_r_w_array[0] = *((uint32_t*)&w_ref); 
+            c1_r_w_array[1] = *((uint32_t*)&w_mech); 
+        } 
+        else if (idx == 2) {
+            c1_r_w_array[0] = *((uint32_t*)&ia); 
+            c1_r_w_array[1] = *((uint32_t*)&ib); 
+        } 
+        else if (idx == 3) {
+            c1_r_w_array[0] = *((uint32_t*)&v_d); 
+            c1_r_w_array[1] = *((uint32_t*)&v_q); 
+        }
+        //if (dummy < 2500) w_ref = -120.0;
+        //c1_r_w_array[0] = *(uint32_t*) &iq; 
+        //c1_r_w_array[1] = *(uint32_t*) &w_mech; 
+        dummy--;
+    	IpcRegs.IPCSET.bit.IPC0 = 1; 
+    } 
+    //record indítja 0 ról 100-ra
+    //vd-vq 
+    
+    AdcaRegs.ADCINTFLGCLR.bit.ADCINT1 = 1; //clear INT1 flag
+ 
+    //
+    // Check if overflow has occurred
+    //
+    if(1 == AdcaRegs.ADCINTOVF.bit.ADCINT1)
+    {
+        AdcaRegs.ADCINTOVFCLR.bit.ADCINT1 = 1; //clear INT1 overflow flag
+        AdcaRegs.ADCINTFLGCLR.bit.ADCINT1 = 1; //clear INT1 flag
+    }
+ 
+    PieCtrlRegs.PIEACK.all = PIEACK_GROUP1;  
+} 
+//
+// End of File
+//
