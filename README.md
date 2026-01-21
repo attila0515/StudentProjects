@@ -8,8 +8,10 @@ The system performs temperature measurement and computes the control signal usin
 The repository also contains the project presentation and the full technical documentation.
 
 ## 2. Master's Thesis
-### File name: Diplomaterv.pdf
+### File name: Diplomaterv
 The aim of the master’s thesis is to examine the applicability of modern optimization methods in contemporary electric drives. One such technique is the family of swarm-intelligence-based algorithms. In this work, I investigated how classical, well-known control methods can be combined with nature-inspired self-organizing algorithms in the case of a permanent magnet synchronous machine. The goal is to analyze how effectively stochastic search methods can be used to optimize the system dynamics while ensuring stable and cost-efficient operation.
+
+The project contains the documentation and the appropriate MATLAB and C files.
 
 ## 3. Practical Application of Deep Learning - Signal Separation Network
 ### File name: Signal Separation Network
